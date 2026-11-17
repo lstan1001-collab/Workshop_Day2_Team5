@@ -26,6 +26,39 @@ test.beforeEach(async ({ context }) => {
   await context.route('**/api/templates', route => route.fulfill({ json: [] }));
 });
 
+test('adds a passkey without disrupting the todo page', async ({ page }) => {
+  await page.route('**/api/todos', route => route.fulfill({ json: [initial] }));
+  await page.route('**/api/auth/add-passkey-options', route => route.fulfill({ json: {
+    challenge: 'dGVzdC1yZWdpc3RyYXRpb24tY2hhbGxlbmdl',
+    rp: { id: 'localhost', name: 'Todo App' },
+    user: { id: 'MQ', name: 'frontend-test', displayName: 'frontend-test' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+    authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+    timeout: 60000,
+    attestation: 'none',
+  } }));
+  let submissions = 0;
+  await page.route('**/api/auth/add-passkey-verify', route => {
+    submissions++;
+    expect(route.request().postDataJSON().response.type).toBe('public-key');
+    return route.fulfill({ json: { success: true } });
+  });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+    protocol: 'ctap2', transport: 'internal', hasResidentKey: true,
+    hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true,
+  } });
+  const session = (await page.context().cookies()).find(cookie => cookie.name === 'session');
+  if (!session) throw new Error('Frontend test session is missing');
+  await page.context().addCookies([{ name: 'session', value: session.value, domain: 'localhost', path: '/' }]);
+  await page.goto('http://localhost:3217/');
+  await page.getByRole('button', { name: 'Add passkey' }).click();
+  await expect(page.getByText('Passkey added.')).toBeVisible();
+  await expect(page.getByText('Weekly review', { exact: true })).toBeVisible();
+  expect(submissions).toBe(1);
+});
+
 test('templates capture checklist/settings, block duplicates and handle save/use failures', async ({ page }) => {
   const child = { id: 8, todo_id: 1, title: 'Read notes', position: 0, completed: true, created_at: initial.created_at };
   let template: Template | null = null;

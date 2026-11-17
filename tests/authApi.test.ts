@@ -23,7 +23,9 @@ vi.mock('next/headers', () => ({
   }),
 }));
 
-const { registerOptions, registerVerify, loginOptions, loginVerify } = await import('@/lib/webauthn');
+const {
+  registerOptions, registerVerify, loginOptions, loginVerify, addPasskeyOptions, addPasskeyVerify,
+} = await import('@/lib/webauthn');
 const { db, authenticatorDB, userDB } = await import('@/lib/db');
 const { GET: me } = await import('@/app/api/auth/me/route');
 const { POST: logout } = await import('@/app/api/auth/logout/route');
@@ -59,18 +61,20 @@ function clientData(challenge: string, type: 'webauthn.create' | 'webauthn.get')
   return Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false }));
 }
 
-function registrationResponse(challenge: string) {
+function registrationResponse(challenge: string, id = credentialId) {
   const length = Buffer.alloc(2);
-  length.writeUInt16BE(credentialId.length);
+  length.writeUInt16BE(id.length);
   const authData = Buffer.concat([
     rpHash, Buffer.from([0x45]), Buffer.alloc(4), Buffer.alloc(16), length,
-    credentialId, coseKey,
+    id, coseKey,
   ]);
   const attestation = isoCBOR.encode(new Map<string, string | Uint8Array | Map<string, never>>([
     ['fmt', 'none'], ['attStmt', new Map<string, never>()], ['authData', new Uint8Array(authData)],
   ]));
   return {
     ...credentialBase,
+    id: id.toString('base64url'),
+    rawId: id.toString('base64url'),
     response: {
       clientDataJSON: clientData(challenge, 'webauthn.create').toString('base64url'),
       attestationObject: Buffer.from(attestation).toString('base64url'),
@@ -78,7 +82,7 @@ function registrationResponse(challenge: string) {
   };
 }
 
-function authenticationResponse(challenge: string, counter: number, validSignature = true) {
+function authenticationResponse(challenge: string, counter: number, validSignature = true, id = credentialId) {
   const count = Buffer.alloc(4);
   count.writeUInt32BE(counter);
   const authData = Buffer.concat([rpHash, Buffer.from([0x05]), count]);
@@ -89,6 +93,8 @@ function authenticationResponse(challenge: string, counter: number, validSignatu
   if (!validSignature) signature[signature.length - 1] ^= 0xff;
   return {
     ...credentialBase,
+    id: id.toString('base64url'),
+    rawId: id.toString('base64url'),
     response: {
       clientDataJSON: client.toString('base64url'),
       authenticatorData: authData.toString('base64url'),
@@ -110,6 +116,7 @@ beforeEach(() => {
   vi.stubEnv('RP_ORIGIN', origin);
   vi.stubEnv('RP_ID', 'localhost');
   state.jar.clear();
+  db.prepare('DELETE FROM auth_challenges').run();
   db.prepare('DELETE FROM users').run();
 });
 
@@ -173,5 +180,57 @@ describe('real WebAuthn verification and sessions', () => {
     }))).status).toBe(401);
     expect(userDB.findByUsername('different')).toBeNull();
     expect(userDB.findByUsername('intended')).toBeNull();
+  });
+
+  it('stores browser-bound challenges in SQLite and consumes expired challenges', async () => {
+    const options = await registerOptions(request({ username: 'expiry-user' }));
+    const { challenge } = await options.json();
+    const id = state.jar.get('webauthn-challenge');
+    expect(db.prepare('SELECT username FROM auth_challenges WHERE id = ?').get(id))
+      .toEqual({ username: 'expiry-user' });
+    db.prepare('UPDATE auth_challenges SET expires = ? WHERE id = ?').run(Date.now() - 1, id);
+    expect((await registerVerify(request({
+      username: 'expiry-user', response: registrationResponse(challenge),
+    }))).status).toBe(401);
+    expect(db.prepare('SELECT id FROM auth_challenges WHERE id = ?').get(id)).toBeUndefined();
+  });
+
+  it('requires an existing session to add a passkey and binds it to the account', async () => {
+    expect((await addPasskeyOptions(request({}))).status).toBe(401);
+    expect((await addPasskeyVerify(request({}))).status).toBe(401);
+    await register();
+    const user = userDB.findByUsername('passkey-user')!;
+    const secondId = randomBytes(32);
+    const options = await addPasskeyOptions(request({}));
+    expect(options.status).toBe(200);
+    const body = await options.json();
+    expect(body.excludeCredentials).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: credentialBase.id }),
+    ]));
+    const response = registrationResponse(body.challenge, secondId);
+    expect((await addPasskeyVerify(request({ response }))).status).toBe(200);
+    expect(authenticatorDB.findByCredentialId(secondId.toString('base64url'))?.user_id).toBe(user.id);
+    expect((await addPasskeyVerify(request({ response }))).status).toBe(401);
+    expect(authenticatorDB.findByUserId(user.id)).toHaveLength(2);
+    await logout();
+    const login = await loginOptions(request({ username: user.username }));
+    const loginChallenge = (await login.json()).challenge;
+    expect((await loginVerify(request({
+      username: user.username, response: authenticationResponse(loginChallenge, 1, true, secondId),
+    }))).status).toBe(200);
+  });
+
+  it('does not add a credential when the session changes between options and verification', async () => {
+    await register();
+    const owner = userDB.findByUsername('passkey-user')!;
+    const other = userDB.create('other-user');
+    const options = await addPasskeyOptions(request({}));
+    const { challenge } = await options.json();
+    const { createSession } = await import('@/lib/auth');
+    await createSession(other);
+    const id = randomBytes(32);
+    expect((await addPasskeyVerify(request({ response: registrationResponse(challenge, id) }))).status).toBe(401);
+    expect(authenticatorDB.findByCredentialId(id.toString('base64url'))).toBeNull();
+    expect(authenticatorDB.findByUserId(owner.id)).toHaveLength(1);
   });
 });

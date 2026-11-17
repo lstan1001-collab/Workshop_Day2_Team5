@@ -192,6 +192,14 @@ const schema = `
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS auth_challenges (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS todos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -320,7 +328,9 @@ function initializeSchema(database: SqliteDatabase): void {
   `);
 }
 
-export function createDatabase(filePath = path.join(process.cwd(), 'todos.db')): SqliteDatabase {
+export function createDatabase(
+  filePath = process.env.DATABASE_PATH ?? path.join(process.cwd(), 'todos.db'),
+): SqliteDatabase {
   const database = new Database(filePath);
   initializeSchema(database);
   return database;

@@ -8,7 +8,7 @@ import {
 import { isoBase64URL } from '@simplewebauthn/server/helpers';
 import { z } from 'zod';
 import { ApiError, apiError, readJSON } from '@/lib/api';
-import { createSession } from '@/lib/auth';
+import { createSession, getSession } from '@/lib/auth';
 import { authenticatorDB, db, userDB } from '@/lib/db';
 
 const usernameSchema = z.string().trim().min(1, 'Username is required').max(64);
@@ -36,9 +36,7 @@ const authenticationSchema = credentialSchema.extend({
   }),
 });
 
-type Ceremony = { username: string; challenge: string; kind: 'register' | 'login'; expires: number };
-const globals = globalThis as typeof globalThis & { todoChallenges?: Map<string, Ceremony> };
-const challenges = globals.todoChallenges ??= new Map();
+type Ceremony = { username: string; challenge: string; kind: 'register' | 'login' | 'add-passkey'; expires: number };
 const CHALLENGE_COOKIE = 'webauthn-challenge';
 
 function relyingParty() {
@@ -55,15 +53,18 @@ function checkOrigin(request: Request): void {
 }
 
 async function saveChallenge(ceremony: Omit<Ceremony, 'expires'>): Promise<void> {
-  for (const [id, entry] of challenges) {
-    if (entry.expires <= Date.now()) challenges.delete(id);
-  }
   const jar = await cookies();
   const previous = jar.get(CHALLENGE_COOKIE)?.value;
-  if (previous) challenges.delete(previous);
-  if (challenges.size >= 10_000) throw new ApiError('Too many authentication attempts', 429);
   const id = randomBytes(32).toString('base64url');
-  challenges.set(id, { ...ceremony, expires: Date.now() + 300_000 });
+  const now = Date.now();
+  db.transaction(() => {
+    db.prepare('DELETE FROM auth_challenges WHERE expires <= ?').run(now);
+    if (previous) db.prepare('DELETE FROM auth_challenges WHERE id = ?').run(previous);
+    const { count } = db.prepare('SELECT COUNT(*) AS count FROM auth_challenges').get() as { count: number };
+    if (count >= 10_000) throw new ApiError('Too many authentication attempts', 429);
+    db.prepare('INSERT INTO auth_challenges (id, username, kind, challenge, expires) VALUES (?, ?, ?, ?, ?)')
+      .run(id, ceremony.username, ceremony.kind, ceremony.challenge, now + 300_000);
+  }).immediate();
   jar.set(CHALLENGE_COOKIE, id, {
     httpOnly: true, secure: process.env.NODE_ENV === 'production',
     sameSite: 'strict', path: '/api/auth', maxAge: 300,
@@ -73,8 +74,10 @@ async function saveChallenge(ceremony: Omit<Ceremony, 'expires'>): Promise<void>
 async function consumeChallenge(username: string, kind: Ceremony['kind']): Promise<string> {
   const jar = await cookies();
   const id = jar.get(CHALLENGE_COOKIE)?.value;
-  const entry = id ? challenges.get(id) : undefined;
-  if (id) challenges.delete(id);
+  const entry = id
+    ? db.prepare('DELETE FROM auth_challenges WHERE id = ? RETURNING username, kind, challenge, expires')
+      .get(id) as Ceremony | undefined
+    : undefined;
   jar.set(CHALLENGE_COOKIE, '', { path: '/api/auth', maxAge: 0 });
   if (!entry || entry.kind !== kind || entry.username !== username || entry.expires <= Date.now()) {
     throw new ApiError('Authentication challenge expired or invalid', 401);
@@ -176,6 +179,60 @@ export async function loginVerify(request: Request) {
       authenticatorDB.updateCounter(authenticator.id, next);
     })();
     await createSession(user);
+    return NextResponse.json({ success: true });
+  } catch (error) { return apiError(error); }
+}
+
+async function authenticatedUser() {
+  const session = await getSession();
+  const user = session ? userDB.findById(session.userId) : null;
+  if (!user || user.username !== session?.username) throw new ApiError('Not authenticated', 401);
+  return user;
+}
+
+export async function addPasskeyOptions(request: Request) {
+  try {
+    checkOrigin(request);
+    const user = await authenticatedUser();
+    const { rpID, rpName } = relyingParty();
+    const options = await generateRegistrationOptions({
+      rpID, rpName, userName: user.username,
+      userID: new TextEncoder().encode(String(user.id)),
+      attestationType: 'none',
+      excludeCredentials: authenticatorDB.findByUserId(user.id).map(({ credential_id }) => ({ id: credential_id })),
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+    });
+    await saveChallenge({ username: user.username, challenge: options.challenge, kind: 'add-passkey' });
+    return NextResponse.json(options);
+  } catch (error) { return apiError(error); }
+}
+
+export async function addPasskeyVerify(request: Request) {
+  try {
+    checkOrigin(request);
+    const user = await authenticatedUser();
+    const { response } = z.object({ response: registrationSchema }).parse(await readJSON(request));
+    const challenge = await consumeChallenge(user.username, 'add-passkey');
+    const { origin, rpID } = relyingParty();
+    const result = await verifyRegistrationResponse({
+      response, expectedChallenge: challenge, expectedOrigin: origin,
+      expectedRPID: rpID, requireUserVerification: true,
+    }).catch(() => { throw new ApiError('Passkey verification failed', 401); });
+    if (!result.verified) throw new ApiError('Passkey verification failed', 401);
+    const { credential } = result.registrationInfo;
+    try {
+      authenticatorDB.create({
+        user_id: user.id,
+        credential_id: isoBase64URL.fromBuffer(isoBase64URL.toBuffer(credential.id)),
+        credential_public_key: Buffer.from(credential.publicKey),
+        counter: credential.counter ?? 0,
+      });
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        throw new ApiError('This passkey is already registered', 409);
+      }
+      throw error;
+    }
     return NextResponse.json({ success: true });
   } catch (error) { return apiError(error); }
 }

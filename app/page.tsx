@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { browserSupportsWebAuthn, startRegistration } from '@simplewebauthn/browser';
 import type { CreateTagInput, CreateTemplateInput, CreateTodoInput, ImportResult, Priority, RecurrencePattern, Subtask, Tag, Template, Todo, UpdateTagInput } from '@/lib/db';
 import { formatSingaporeDate, getSingaporeNow, parseSingaporeDate, toSingaporeISO } from '@/lib/timezone';
 import { calculateProgress, sectionTodos, validateDraft } from '@/lib/todoPresentation';
@@ -48,6 +49,56 @@ function useRequest() {
 
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : 'Something went wrong. Please try again.';
+}
+
+function PasskeyEnrollment() {
+  const [pending, setPending] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const busy = useRef(false);
+
+  async function addPasskey() {
+    if (busy.current) return;
+    busy.current = true;
+    setPending(true); setNotice(''); setError('');
+    try {
+      if (!browserSupportsWebAuthn()) throw new Error('Your browser or device does not support passkeys.');
+      async function post<T>(path: string, body: unknown): Promise<T> {
+        const response = await fetch(path, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+            ? data.error : `Passkey setup failed (${response.status}).`);
+        }
+        return data as T;
+      }
+      const optionsJSON = await post<Parameters<typeof startRegistration>[0]['optionsJSON']>(
+        '/api/auth/add-passkey-options', {},
+      );
+      const response = await startRegistration({ optionsJSON });
+      await post('/api/auth/add-passkey-verify', { response });
+      setNotice('Passkey added.');
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === 'NotAllowedError') {
+        setNotice('Passkey prompt cancelled. You can try again.');
+      } else {
+        setError(message(cause));
+      }
+    } finally {
+      busy.current = false;
+      setPending(false);
+    }
+  }
+
+  return <div>
+    <button type="button" disabled={pending} onClick={() => void addPasskey()}>
+      {pending ? 'Adding passkey...' : 'Add passkey'}
+    </button>
+    <p role="status">{notice}</p>
+    {error && <p role="alert" className="error">{error}</p>}
+  </div>;
 }
 
 function Modal({ title, children, onClose, pending }: {
@@ -854,6 +905,7 @@ export default function TodoPage() {
       <nav className="row" aria-label="Main">
         <Link href="/calendar">Calendar</Link>
         <button onClick={() => setManagingTemplates(true)}>Templates</button>
+        <PasskeyEnrollment />
         <button onClick={() => void logout()} disabled={pending.has('logout')}>Logout</button>
       </nav>
     </header>

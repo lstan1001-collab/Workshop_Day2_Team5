@@ -1,6 +1,7 @@
 # Backend contract
 
-The app runs on the Next.js Node.js runtime, with SQLite in `todos.db`.
+The app runs on the Next.js Node.js runtime, with SQLite in `todos.db` by default.
+Set `DATABASE_PATH` to a file in a persistent directory for deployment.
 Run `npm install`, copy `.env.example` to `.env.local`, and replace `JWT_SECRET`
 with at least 32 cryptographically random bytes. Never commit `.env.local`.
 Configure `RP_ID` and `RP_ORIGIN` for the deployment hostname and HTTPS origin.
@@ -12,9 +13,14 @@ Authentication uses the documented options/verify endpoints with
 `GET /api/auth/me` returns `{ userId, username }`; logout is a POST.
 Sessions are HTTP-only, SameSite=Lax cookies with a seven-day expiry.
 WebAuthn challenges are browser-bound, single-use, and expire after five minutes.
-The challenge store is process-local: restarting the server requires retrying
-login/registration. Deploy one Node process with the local SQLite database.
-Multi-process deployment requires a shared challenge store and suitable database.
+Challenges are stored in SQLite so workers sharing the same database can complete
+the same ceremony. SQLite must reside on persistent storage; separate database
+files or hosts do not share challenges or account data.
+
+Signed-in users can add another passkey with `POST /api/auth/add-passkey-options`
+and `POST /api/auth/add-passkey-verify`. Both determine the account from the
+session; verification accepts `{ response }` and returns `{ success: true }`.
+There is no account recovery if all passkeys are lost.
 
 The backend supports Todo CRUD and priority plus recurring completion,
 reminder polling, subtasks, templates, export/import, and calendar holidays
@@ -22,6 +28,10 @@ reminder polling, subtasks, templates, export/import, and calendar holidays
 
 Verify with `npm run typecheck`, `npm run lint`, and `npm test`.
 Once the UI is present, also run `npm run build` and `npm run test:e2e`.
+For real-server virtual-passkey coverage, set `AUTH_E2E_DATABASE_PATH` to an
+absolute path for a disposable database, then run
+`npx playwright test --config playwright.auth.config.ts`. Remove that database
+afterward; the test creates an account in it.
 
 ## Todo API
 
