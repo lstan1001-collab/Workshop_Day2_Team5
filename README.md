@@ -1,5 +1,55 @@
 # Complete Setup Guide: Todo App Development with GitHub Copilot
 
+## Implemented on the frontend branch
+
+This branch contains only the Phase 5 authentication frontend: Next.js 16,
+React 19, username-only passkey Register/Login, Logout, and Add passkey.
+The remaining guide below describes the target application, not completed features.
+Backend auth routes, session cookies, middleware, database implementation, calendar,
+and todo features are not included in this branch.
+
+Requires Node.js 20.9+ (Node.js 24 LTS recommended).
+
+```powershell
+npm ci
+npm run typecheck
+npm run build
+npx playwright install chromium
+npm run test:ui
+npm run dev
+```
+
+The UI requires these backend contracts; until they exist, the session check
+shows an error rather than allowing simulated access:
+
+- `GET /api/auth/me`: `{ "userId": 1, "username": "alice" }` (example), or 401.
+- `POST /api/auth/register-options` and `/login-options`: `{ username }` request,
+  SimpleWebAuthn JSON options response.
+- `POST /api/auth/register-verify` and `/login-verify`:
+  `{ username, response }` request; set the HTTP-only session cookie before
+  returning successful JSON or 204.
+- `POST /api/auth/logout`: `{}` request; clear the cookie before returning
+  successful JSON or 204.
+- Approved extension: session-protected `/api/auth/add-passkey-options` accepts
+  `{}` and returns registration options; `/api/auth/add-passkey-verify` accepts
+  `{ response }`. Determine the owner from the existing session.
+- Failures: non-2xx with `{ "error": "Readable message" }`.
+
+The UI preserves usernames after cancellation, prevents duplicate submissions,
+announces status/errors, and redirects only after successful verification.
+Client session checks are UX aids, not server authorization. Passkeys require
+HTTPS in deployment; localhost is allowed during development. Account recovery
+is not available if all passkeys are lost.
+
+`npm run test:ui` starts and stops a temporary server on port 3105. Its seven
+frontend contract tests use mocked API responses and Chromium virtual
+authenticators, with timezone `Asia/Singapore`. They do not verify server
+signatures, cookies, database writes, middleware, expiry, or physical devices.
+The UI uses plain responsive CSS; Tailwind tooling is not introduced for this
+small authentication-only implementation.
+
+---
+
 This walkthrough will guide you from zero to running the Todo App with GitHub Copilot assistance.
 
 Reference : https://ai-sdlc-workshop-day1-production.up.railway.app/login
