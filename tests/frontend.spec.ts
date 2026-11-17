@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { SignJWT } from 'jose';
-import type { Todo } from '../lib/db';
+import type { Tag, Todo } from '../lib/db';
 
 const initial: Todo = {
   id: 1, user_id: 1, title: 'Weekly review', completed: false,
@@ -8,6 +8,10 @@ const initial: Todo = {
   is_recurring: true, recurrence_pattern: 'monthly', reminder_minutes: 60,
   last_notification_sent: null, created_at: '2026-11-17T10:00:00+08:00',
   updated_at: null, subtasks: [], tags: [],
+};
+const workTag: Tag = {
+  id: 6, user_id: 1, name: 'Work', color: '#16A34A',
+  created_at: initial.created_at,
 };
 
 test.beforeEach(async ({ context }) => {
@@ -18,6 +22,7 @@ test.beforeEach(async ({ context }) => {
     .setIssuer('todo-app').setAudience('todo-app')
     .sign(new TextEncoder().encode(secret));
   await context.addCookies([{ name: 'session', value: token, domain: '127.0.0.1', path: '/' }]);
+  await context.route('**/api/tags', route => route.fulfill({ json: [] }));
 });
 
 test('recurring completion reconciles next instance and rolls back an API failure', async ({ page }) => {
@@ -256,4 +261,99 @@ test('denied notification permission does not poll or change reminder settings',
   await page.clock.fastForward(90_000);
   expect(checks).toBe(0);
   expect(writes).toBe(0);
+});
+
+test('search, tag and advanced filters work with saved presets', async ({ page }) => {
+  await page.clock.install();
+  const tagged = {
+    ...initial,
+    subtasks: [{
+      id: 5, todo_id: initial.id, title: 'Send report', completed: false,
+      position: 0, created_at: initial.created_at,
+    }],
+    tags: [workTag],
+  };
+  const other = { ...initial, id: 2, title: 'Project setup', priority: 'medium' as const };
+  await page.route('**/api/tags', route => route.fulfill({ json: [workTag] }));
+  await page.route('**/api/todos', route => route.fulfill({ json: [tagged, other] }));
+  await page.goto('/');
+
+  await page.getByLabel('Search todos and subtasks').fill('report');
+  await page.clock.fastForward(300);
+  await expect(page.getByText('Weekly review', { exact: true })).toBeVisible();
+  await expect(page.getByText('Project setup', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  await expect(page.getByText('Project setup', { exact: true })).toBeVisible();
+
+  await page.getByLabel('Priority', { exact: true }).selectOption('high');
+  await page.getByLabel('Tag', { exact: true }).selectOption('6');
+  await page.getByRole('button', { name: '▶ Advanced' }).click();
+  await page.getByLabel('Completion status').selectOption('incomplete');
+  await page.getByLabel('Due Date From').fill('2099-01-01');
+  await page.getByRole('button', { name: 'Save Filter' }).click();
+  const presetDialog = page.getByRole('dialog', { name: 'Save Filter Preset' });
+  await presetDialog.getByLabel('Preset name').fill('Future Work');
+  await presetDialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(presetDialog).not.toBeVisible();
+  await expect(page.getByRole('button', { name: 'Future Work', exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Clear All' }).click();
+  await page.getByRole('button', { name: 'Future Work', exact: true }).click();
+  await expect(page.getByText('Weekly review', { exact: true })).toBeVisible();
+  await expect(page.getByText('Project setup', { exact: true })).toHaveCount(0);
+
+  await page.reload();
+  await page.getByRole('button', { name: '▶ Advanced' }).click();
+  await expect(page.getByRole('button', { name: 'Future Work', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Future Work', exact: true }).click();
+  await expect(page.getByText('Weekly review', { exact: true })).toBeVisible();
+  await expect(page.getByText('Project setup', { exact: true })).toHaveCount(0);
+});
+
+test('tags can be selected for todos and created, edited and deleted', async ({ page }) => {
+  const existing = { ...initial, id: 2, title: 'Existing task' };
+  let lastTagName = '';
+  await page.route('**/api/tags', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [workTag] });
+    const body = route.request().postDataJSON();
+    lastTagName = body.name;
+    return route.fulfill({ status: 201, json: { ...workTag, id: 7, name: body.name, color: body.color } });
+  });
+  await page.route('**/api/tags/7', async route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      lastTagName = body.name;
+      return route.fulfill({ json: { ...workTag, id: 7, name: body.name, color: body.color } });
+    }
+    return route.fulfill({ json: { success: true } });
+  });
+  let submittedTags: number[] = [];
+  await page.route('**/api/todos', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [existing] });
+    const body = route.request().postDataJSON();
+    submittedTags = body.tag_ids;
+    return route.fulfill({ status: 201, json: { ...initial, id: 3, title: body.title, tags: [workTag] } });
+  });
+  await page.goto('/');
+  await page.getByLabel('Title', { exact: true }).fill('Tagged task');
+  await page.getByRole('button', { name: 'Select tag Work' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(page.getByText('Tagged task', { exact: true })).toBeVisible();
+  expect(submittedTags).toEqual([workTag.id]);
+  await page.getByRole('button', { name: 'Filter todos by Work' }).click();
+  await expect(page.getByText('Existing task', { exact: true })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Manage Tags' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Manage Tags' });
+  await dialog.getByLabel('New tag name').fill('Project');
+  await dialog.getByRole('button', { name: 'Create Tag' }).click();
+  await expect(dialog.getByText('Project', { exact: true })).toBeVisible();
+  await dialog.locator('li').filter({ hasText: 'Project' }).getByRole('button', { name: 'Edit' }).click();
+  await dialog.getByLabel('Edit tag name').fill('Projects');
+  await dialog.getByRole('button', { name: 'Update Tag' }).click();
+  await expect(dialog.getByText('Projects', { exact: true })).toBeVisible();
+  page.on('dialog', browserDialog => browserDialog.accept());
+  await dialog.locator('li').filter({ hasText: 'Projects' }).getByRole('button', { name: 'Delete' }).click();
+  await expect(dialog.getByText('Projects', { exact: true })).toHaveCount(0);
+  expect(lastTagName).toBe('Projects');
 });

@@ -13,7 +13,7 @@ const state = await vi.hoisted(async () => {
   return { previous, directory };
 });
 
-const { createDatabase, db, subtaskDB, todoDB, userDB } = await import('@/lib/db');
+const { createDatabase, db, subtaskDB, tagDB, todoDB, userDB } = await import('@/lib/db');
 const owner = userDB.create('database-owner');
 const other = userDB.create('database-other');
 
@@ -74,6 +74,60 @@ describe('feature schema compatibility', () => {
     } finally {
       unlinkSync(file);
     }
+  });
+});
+
+describe('tag persistence', () => {
+  it('scopes names by user, trims names, and defaults the color', () => {
+    const tag = tagDB.create(owner.id, { name: '  Work  ' });
+    const sameNameForOtherUser = tagDB.create(other.id, { name: 'Work', color: '#123456' });
+
+    expect(tag).toMatchObject({ user_id: owner.id, name: 'Work', color: '#3B82F6' });
+    expect(sameNameForOtherUser).toMatchObject({
+      user_id: other.id, name: 'Work', color: '#123456',
+    });
+    expect(tagDB.findAllByUser(owner.id)).toEqual([tag]);
+    expect(tagDB.findAllByUser(other.id)).toEqual([sameNameForOtherUser]);
+    expect(() => tagDB.create(owner.id, { name: 'Work' })).toThrow();
+    expect(() => tagDB.create(owner.id, { name: '  ' })).toThrow('Tag name is required');
+    expect(() => tagDB.create(owner.id, { name: 'Bad color', color: 'red' }))
+      .toThrow('Color must be a valid hex code');
+  });
+
+  it('updates and deletes only tags owned by the user', () => {
+    const tag = tagDB.create(owner.id, { name: 'Work' });
+
+    expect(tagDB.update(tag.id, other.id, { name: 'Private' })).toBeNull();
+    expect(tagDB.delete(tag.id, other.id)).toBe(false);
+    expect(tagDB.update(tag.id, owner.id, { name: '  Project  ', color: '#AABBCC' }))
+      .toMatchObject({ id: tag.id, user_id: owner.id, name: 'Project', color: '#AABBCC' });
+    expect(() => tagDB.update(tag.id, owner.id, { color: 'blue' }))
+      .toThrow('Color must be a valid hex code');
+    expect(tagDB.delete(tag.id, owner.id)).toBe(true);
+    expect(tagDB.delete(tag.id, owner.id)).toBe(false);
+  });
+
+  it('attaches and detaches idempotently and cascades tag deletion', () => {
+    const todo = todoDB.create({ user_id: owner.id, title: 'Tagged todo' });
+    const first = tagDB.create(owner.id, { name: 'First' });
+    const second = tagDB.create(owner.id, { name: 'Second' });
+    const foreign = tagDB.create(other.id, { name: 'Foreign' });
+
+    expect(tagDB.attachToTodo(todo.id, first.id, owner.id)).toBe(true);
+    expect(tagDB.attachToTodo(todo.id, first.id, owner.id)).toBe(false);
+    expect(tagDB.attachToTodo(todo.id, second.id, owner.id)).toBe(true);
+    expect(tagDB.attachToTodo(todo.id, foreign.id, owner.id)).toBe(false);
+    expect(tagDB.attachToTodo(todo.id, first.id, other.id)).toBe(false);
+    expect(tagDB.findByTodoId(todo.id, other.id)).toEqual([]);
+    expect(tagDB.findByTodoId(todo.id, owner.id).map(({ id }) => id))
+      .toEqual([first.id, second.id]);
+
+    expect(tagDB.detachFromTodo(todo.id, first.id, other.id)).toBe(false);
+    expect(tagDB.detachFromTodo(todo.id, first.id, owner.id)).toBe(true);
+    expect(tagDB.detachFromTodo(todo.id, first.id, owner.id)).toBe(false);
+    expect(tagDB.delete(second.id, owner.id)).toBe(true);
+    expect(db.prepare('SELECT tag_id FROM todo_tags WHERE todo_id = ?').all(todo.id))
+      .toEqual([]);
   });
 });
 

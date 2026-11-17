@@ -34,6 +34,16 @@ export interface Tag {
   created_at: string;
 }
 
+export interface CreateTagInput {
+  name: string;
+  color?: string;
+}
+
+export interface UpdateTagInput {
+  name?: string;
+  color?: string;
+}
+
 export interface Subtask {
   id: number;
   todo_id: number;
@@ -401,6 +411,104 @@ export const authenticatorDB = {
     return db
       .prepare('SELECT * FROM authenticators WHERE id = ?')
       .get(id) as Authenticator;
+  },
+};
+
+function validateTagInput(input: CreateTagInput | UpdateTagInput): void {
+  if (input.name !== undefined && !input.name.trim()) {
+    throw new RangeError('Tag name is required');
+  }
+  if (input.color !== undefined && !/^#[0-9A-Fa-f]{6}$/.test(input.color)) {
+    throw new RangeError('Color must be a valid hex code');
+  }
+}
+
+export const tagDB = {
+  findAllByUser(userId: number): Tag[] {
+    return db
+      .prepare(
+        `SELECT id, user_id, name, color, created_at
+         FROM tags WHERE user_id = ?
+         ORDER BY name COLLATE NOCASE ASC, id ASC`,
+      )
+      .all(userId) as Tag[];
+  },
+
+  findById(id: number, userId: number): Tag | null {
+    return (
+      (db
+        .prepare(
+          `SELECT id, user_id, name, color, created_at
+           FROM tags WHERE id = ? AND user_id = ?`,
+        )
+        .get(id, userId) as Tag | undefined) ?? null
+    );
+  },
+
+  create(userId: number, input: CreateTagInput): Tag {
+    validateTagInput(input);
+    const result = db
+      .prepare('INSERT INTO tags (user_id, name, color) VALUES (?, ?, ?)')
+      .run(userId, input.name.trim(), input.color ?? '#3B82F6');
+    const tag = tagDB.findById(Number(result.lastInsertRowid), userId);
+    if (!tag) throw new Error('Created tag could not be loaded');
+    return tag;
+  },
+
+  update(id: number, userId: number, input: UpdateTagInput): Tag | null {
+    validateTagInput(input);
+    const existing = tagDB.findById(id, userId);
+    if (!existing) return null;
+
+    const name = input.name === undefined ? existing.name : input.name.trim();
+    const color = input.color ?? existing.color;
+    db.prepare(
+      'UPDATE tags SET name = ?, color = ? WHERE id = ? AND user_id = ?',
+    ).run(name, color, id, userId);
+    return tagDB.findById(id, userId);
+  },
+
+  delete(id: number, userId: number): boolean {
+    return db
+      .prepare('DELETE FROM tags WHERE id = ? AND user_id = ?')
+      .run(id, userId).changes > 0;
+  },
+
+  attachToTodo(todoId: number, tagId: number, userId: number): boolean {
+    return db.prepare(
+      `INSERT INTO todo_tags (todo_id, tag_id)
+       SELECT todos.id, tags.id
+       FROM todos
+       INNER JOIN tags ON tags.id = ?
+       WHERE todos.id = ? AND todos.user_id = ? AND tags.user_id = ?
+       ON CONFLICT(todo_id, tag_id) DO NOTHING`,
+    ).run(tagId, todoId, userId, userId).changes > 0;
+  },
+
+  detachFromTodo(todoId: number, tagId: number, userId: number): boolean {
+    return db.prepare(
+      `DELETE FROM todo_tags
+       WHERE todo_id = ? AND tag_id = ?
+         AND EXISTS (
+           SELECT 1 FROM todos
+           WHERE todos.id = todo_tags.todo_id AND todos.user_id = ?
+         )
+         AND EXISTS (
+           SELECT 1 FROM tags
+           WHERE tags.id = todo_tags.tag_id AND tags.user_id = ?
+         )`,
+    ).run(todoId, tagId, userId, userId).changes > 0;
+  },
+
+  findByTodoId(todoId: number, userId: number): Tag[] {
+    return db.prepare(
+      `SELECT tags.id, tags.user_id, tags.name, tags.color, tags.created_at
+       FROM tags
+       INNER JOIN todo_tags ON todo_tags.tag_id = tags.id
+       INNER JOIN todos ON todos.id = todo_tags.todo_id
+       WHERE todo_tags.todo_id = ? AND todos.user_id = ? AND tags.user_id = ?
+       ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC`,
+    ).all(todoId, userId, userId) as Tag[];
   },
 };
 
