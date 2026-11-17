@@ -17,7 +17,8 @@ login/registration. Deploy one Node process with the local SQLite database.
 Multi-process deployment requires a shared challenge store and suitable database.
 
 The backend supports Todo CRUD and priority plus recurring completion,
-reminder polling, and subtasks (PRPs 03-05). Authentication is their prerequisite.
+reminder polling, subtasks, templates, export/import, and calendar holidays
+(PRPs 03-05, 07, 09-10). Authentication is their prerequisite.
 
 Verify with `npm run typecheck`, `npm run lint`, and `npm test`.
 Once the UI is present, also run `npm run build` and `npm run test:e2e`.
@@ -72,3 +73,70 @@ plus one, starting at zero. Deletion does not compact positions. Foreign keys
 are enabled on every connection so parent deletion removes children and tag
 associations. Schema initialization adds missing todo feature columns without
 replacing existing rows and is safe to repeat.
+
+## Templates, backups and calendar (PRPs 07, 09-10)
+
+All endpoints authenticate first and follow the error contract above. Template
+IDs are positive safe integers; missing and foreign-owned templates return 404.
+
+- `GET /api/templates`: `Template[]` for the session user.
+- `POST /api/templates`: `CreateTemplateInput`; returns a Template (201).
+- `PUT /api/templates/[id]`: `UpdateTemplateInput`; returns a Template. Omitted
+  fields are preserved and validation considers the combined state.
+- `DELETE /api/templates/[id]`: `{ success: true }`; instantiated todos remain.
+- `POST /api/templates/[id]/use`: no body; returns a fresh Todo (201) with
+  `subtasks` and `tags` arrays. Creation is transactional.
+
+Templates snapshot checklists (titles and array order); instances start with
+incomplete subtasks and no tags. Names/titles cannot be whitespace. Relative
+due-date offsets must be positive integer minutes when set. Recurring templates
+require a pattern and offset; reminders require an offset. Use computes the due
+instant from server time and returns Singapore ISO with `+08:00`. Unlike the
+PRP's silent checklist fallback, corrupt stored templates return a logged 500
+without creating an incomplete task.
+
+- `GET /api/todos/export?format=json|csv`: downloads all of the current user's
+  todos, ignoring UI filters. JSON is the default; unsupported formats are 400.
+  Filenames use the current Singapore date and responses are private/no-store.
+- JSON is a `TodoExport` envelope: `{ version: 1, exported_at, todos }`.
+  Items contain todo properties, `subtasks: [{title, completed, position}]`,
+  and `tags: [{name, color}]`, without IDs/ownership/notification stamps.
+- CSV uses fixed columns `ID,Title,Completed,Due Date,Priority,Recurring,Pattern,Reminder`,
+  CRLF row separators and RFC 4180 escaping. Formula-leading cells are prefixed
+  with an apostrophe to prevent spreadsheet formula execution. JSON stays lossless.
+- `POST /api/todos/import`: accepts the JSON envelope, validates the whole
+  document, then imports atomically with new IDs. Returns
+  `{ success: true, imported, tagsCreated, tagsReused }`. Tag names are reused
+  case-insensitively within the importing user; existing tag colors are kept.
+  Subtask order/completion and creation timestamps are preserved; positions are
+  compacted from zero. Historical due dates are allowed; notification stamps
+  reset. Import creates duplicates rather than updating existing todos.
+
+Import rejects unknown fields, invalid dates/enums, blank names/titles, invalid
+tag colors and inconsistent recurrence/reminder settings. Malformed JSON returns
+`Invalid JSON format`; an invalid envelope returns
+`Failed to import todos. Please check the file format.` (both 400).
+Empty exports/imports are supported. SQLite UTC creation timestamps and ISO
+timestamps are accepted; due dates are normalized to Singapore ISO.
+
+`GET /api/holidays` returns `{ holidays: Holiday[] }`. Providing both
+`?year=YYYY&month=M` scopes holidays to the visible Sunday-start 42-day grid,
+including adjacent-month cells; malformed/incomplete ranges are 400. Public
+holiday records are global, but this read endpoint still requires authentication.
+
+Run `npx tsx scripts/seed-holidays.ts` from the project root to seed 2026-2027
+Singapore holidays. The script transactionally upserts dates and is safe to
+repeat without duplicating them. Dates come from the
+[Ministry of Manpower](https://www.mom.gov.sg/employment-practices/public-holidays),
+checked 17 November 2026; substitute holidays are labeled as conditional on a
+Sunday rest day. Review the official source before extending the seeded years.
+No live holiday service is called by the app; unseeded years return empty data.
+
+Focused route integration checks: `npm test -- tests/productivityApi.test.ts`.
+They exercise the actual routes and SQLite persistence with a mocked session
+provider in a temporary directory, including ownership, backups, rollback,
+validation, Singapore midnight and calendar-grid boundaries.
+`npm run test:e2e -- --config=playwright.frontend.config.ts` also includes a
+live browser round-trip through the real routes, JWT session verification and
+SQLite, without network mocks. That test creates a uniquely named user in the
+local database and deletes only that user's records afterward.

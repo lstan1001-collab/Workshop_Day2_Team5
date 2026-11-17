@@ -7,14 +7,14 @@ export class ApiError extends Error {
   }
 }
 
-export async function readJSON(request: Request): Promise<unknown> {
+export async function readJSON(request: Request, invalidMessage = 'Invalid JSON'): Promise<unknown> {
   if (!request.headers.get('content-type')?.includes('application/json')) {
     throw new ApiError('Content-Type must be application/json', 415);
   }
   try {
     return await request.json();
   } catch (error) {
-    if (error instanceof SyntaxError) throw new ApiError('Invalid JSON');
+    if (error instanceof SyntaxError) throw new ApiError(invalidMessage);
     throw error;
   }
 }

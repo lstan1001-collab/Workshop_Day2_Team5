@@ -3,9 +3,14 @@ import type { CreateTodoInput, Priority, Todo, UpdateTodoInput } from '@/lib/db'
 import { ApiError } from '@/lib/api';
 import { getSingaporeNow, parseSingaporeDate, toSingaporeISO } from '@/lib/timezone';
 
-const prioritySchema = z.enum(['high', 'medium', 'low'], {
+export const prioritySchema = z.enum(['high', 'medium', 'low'], {
   error: "Priority must be 'high', 'medium', or 'low'.",
 });
+export const recurrencePatternSchema = z.enum(['daily', 'weekly', 'monthly', 'yearly']);
+export const reminderMinutesSchema = z.union([
+  z.literal(15), z.literal(30), z.literal(60), z.literal(120),
+  z.literal(1440), z.literal(2880), z.literal(10080),
+]);
 const dateSchema = z.string().transform((value, context) => {
   const date = parseSingaporeDate(value);
   if (!date) {
@@ -27,11 +32,8 @@ const fields = {
   due_date: dateSchema.optional(),
   priority: prioritySchema.optional(),
   is_recurring: z.boolean().optional(),
-  recurrence_pattern: z.enum(['daily', 'weekly', 'monthly', 'yearly']).nullable().optional(),
-  reminder_minutes: z.union([
-    z.literal(15), z.literal(30), z.literal(60), z.literal(120),
-    z.literal(1440), z.literal(2880), z.literal(10080),
-  ]).nullable().optional(),
+  recurrence_pattern: recurrencePatternSchema.nullable().optional(),
+  reminder_minutes: reminderMinutesSchema.nullable().optional(),
   tag_ids: z.array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
     .transform((ids) => [...new Set(ids)]).optional(),
 };

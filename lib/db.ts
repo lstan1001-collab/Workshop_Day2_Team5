@@ -1005,12 +1005,14 @@ export const holidayDB = {
     if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
       throw new RangeError('A valid year and month are required');
     }
-    const firstDay = new Date(Date.UTC(year, month - 1, 1));
+    const firstDay = new Date(0);
+    firstDay.setUTCFullYear(year, month - 1, 1);
+    firstDay.setUTCHours(0, 0, 0, 0);
     const firstWeekday = firstDay.getUTCDay();
     const gridStart = new Date(firstDay.getTime() - firstWeekday * 86_400_000);
     const gridEnd = new Date(gridStart.getTime() + 41 * 86_400_000);
-    const startDate = gridStart.toISOString().slice(0, 10);
-    const endDate = gridEnd.toISOString().slice(0, 10);
+    const startDate = gridStart.getUTCFullYear() < 0 ? '0000-01-01' : gridStart.toISOString().slice(0, 10);
+    const endDate = gridEnd.getUTCFullYear() > 9999 ? '9999-12-31' : gridEnd.toISOString().slice(0, 10);
     return db.prepare(
       `SELECT id, date, name FROM holidays
        WHERE date >= ? AND date <= ?
