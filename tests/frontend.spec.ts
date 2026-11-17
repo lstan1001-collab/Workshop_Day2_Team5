@@ -285,8 +285,8 @@ test('search, tag and advanced filters work with saved presets', async ({ page }
   await page.getByRole('button', { name: 'Clear search' }).click();
   await expect(page.getByText('Project setup', { exact: true })).toBeVisible();
 
-  await page.getByLabel('Priority', { exact: true }).selectOption('high');
-  await page.getByLabel('Tag', { exact: true }).selectOption('6');
+  await page.locator('#priority-filter').selectOption('high');
+  await page.locator('#tag-filter').selectOption('6');
   await page.getByRole('button', { name: '▶ Advanced' }).click();
   await page.getByLabel('Completion status').selectOption('incomplete');
   await page.getByLabel('Due Date From').fill('2099-01-01');
