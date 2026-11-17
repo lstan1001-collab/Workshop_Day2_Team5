@@ -93,12 +93,87 @@ export interface UpdateTodoInput extends Partial<CreateTodoInput> {
   completed?: boolean;
 }
 
+export interface TemplateSubtask {
+  title: string;
+  position: number;
+}
+
+export interface Template {
+  id: number;
+  user_id: number;
+  name: string;
+  description: string | null;
+  category: string | null;
+  title_template: string;
+  priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  due_date_offset_minutes: number | null;
+  subtasks_json: string | null;
+  created_at: string;
+}
+
+export interface CreateTemplateInput {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  title_template: string;
+  priority?: Priority;
+  is_recurring?: boolean;
+  recurrence_pattern?: RecurrencePattern | null;
+  reminder_minutes?: number | null;
+  due_date_offset_minutes?: number | null;
+  subtasks?: TemplateSubtask[];
+}
+
+export type UpdateTemplateInput = Partial<CreateTemplateInput>;
+
+export interface Holiday {
+  id: number;
+  date: string;
+  name: string;
+}
+
+export interface TodoImportItem {
+  title: string;
+  completed: boolean;
+  due_date: string | null;
+  priority: Priority;
+  is_recurring: boolean;
+  recurrence_pattern: RecurrencePattern | null;
+  reminder_minutes: number | null;
+  created_at: string;
+  subtasks: Array<{
+    title: string;
+    completed: boolean;
+    position: number;
+  }>;
+  tags: Array<{
+    name: string;
+    color: string;
+  }>;
+}
+
+export interface TodoExport {
+  version: 1;
+  exported_at: string;
+  todos: TodoImportItem[];
+}
+
+export interface ImportResult {
+  imported: number;
+  tagsCreated: number;
+  tagsReused: number;
+}
+
 type TodoRecord = Omit<Todo, 'completed' | 'is_recurring' | 'subtasks' | 'tags'> & {
   completed: number;
   is_recurring: number;
 };
 
 type SubtaskRecord = Omit<Subtask, 'completed'> & { completed: number };
+type TemplateRecord = Omit<Template, 'is_recurring'> & { is_recurring: number };
 type SqliteDatabase = InstanceType<typeof Database>;
 
 const schema = `
@@ -152,6 +227,28 @@ const schema = `
     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (todo_id, tag_id)
   );
+  CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    category TEXT,
+    title_template TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    is_recurring INTEGER NOT NULL DEFAULT 0,
+    recurrence_pattern TEXT,
+    reminder_minutes INTEGER,
+    due_date_offset_minutes INTEGER,
+    subtasks_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS holidays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_holidays_date ON holidays(date);
 `;
 
 function tableColumns(database: SqliteDatabase, table: string): string[] {
@@ -219,6 +316,7 @@ function initializeSchema(database: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id);
     CREATE INDEX IF NOT EXISTS idx_tags_user_id ON tags(user_id);
     CREATE INDEX IF NOT EXISTS idx_todo_tags_tag_id ON todo_tags(tag_id);
+    CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
   `);
 }
 
@@ -524,6 +622,10 @@ export const todoDB = {
     return mapTodos(records, db);
   },
 
+  findAllWithRelations(userId: number): Todo[] {
+    return todoDB.findAllByUser(userId);
+  },
+
   findById(id: number, userId: number): Todo | null {
     return findTodoById(db, id, userId);
   },
@@ -686,6 +788,246 @@ export const todoDB = {
         .prepare('DELETE FROM todos WHERE id = ? AND user_id = ?')
         .run(id, userId).changes > 0
     );
+  },
+
+  importAll(userId: number, items: TodoImportItem[]): ImportResult {
+    const importItems = db.transaction(() => {
+      let tagsCreated = 0;
+      let tagsReused = 0;
+      const insertTodo = db.prepare(
+        `INSERT INTO todos
+          (user_id, title, completed, due_date, priority, is_recurring,
+           recurrence_pattern, reminder_minutes, last_notification_sent, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      );
+      const insertSubtask = db.prepare(
+        `INSERT INTO subtasks (todo_id, title, completed, position)
+         VALUES (?, ?, ?, ?)`,
+      );
+      const findTagByName = db.prepare(
+        `SELECT id FROM tags WHERE user_id = ? AND name = ? COLLATE NOCASE`,
+      );
+      const insertTag = db.prepare(
+        'INSERT INTO tags (user_id, name, color) VALUES (?, ?, ?)',
+      );
+      const attachTag = db.prepare(
+        `INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)
+         ON CONFLICT(todo_id, tag_id) DO NOTHING`,
+      );
+
+      for (const item of items) {
+        const todoId = Number(insertTodo.run(
+          userId,
+          item.title,
+          item.completed ? 1 : 0,
+          item.due_date,
+          item.priority,
+          item.is_recurring ? 1 : 0,
+          item.recurrence_pattern,
+          item.reminder_minutes,
+          item.created_at,
+        ).lastInsertRowid);
+
+        item.subtasks.forEach((subtask, index) => {
+          insertSubtask.run(
+            todoId,
+            subtask.title,
+            subtask.completed ? 1 : 0,
+            index,
+          );
+        });
+
+        for (const tag of item.tags) {
+          const tagName = tag.name.trim();
+          if (!tagName) throw new RangeError('Imported tag name is required');
+          const existing = findTagByName.get(userId, tagName) as { id: number } | undefined;
+          let tagId: number;
+          if (existing) {
+            tagId = existing.id;
+            tagsReused++;
+          } else {
+            tagId = Number(insertTag.run(userId, tagName, tag.color).lastInsertRowid);
+            tagsCreated++;
+          }
+          attachTag.run(todoId, tagId);
+        }
+      }
+
+      return { imported: items.length, tagsCreated, tagsReused };
+    });
+
+    return importItems();
+  },
+};
+
+export const templateDB = {
+  findAllByUser(userId: number): Template[] {
+    return (db
+      .prepare(
+        `SELECT * FROM templates WHERE user_id = ?
+         ORDER BY created_at DESC, id DESC`,
+      )
+      .all(userId) as TemplateRecord[]).map((record) => ({
+      ...record,
+      is_recurring: Boolean(record.is_recurring),
+      priority: record.priority as Priority,
+      recurrence_pattern: record.recurrence_pattern as RecurrencePattern | null,
+    }));
+  },
+
+  findById(id: number, userId: number): Template | null {
+    const record = db
+      .prepare('SELECT * FROM templates WHERE id = ? AND user_id = ?')
+      .get(id, userId) as TemplateRecord | undefined;
+    return record
+      ? {
+          ...record,
+          is_recurring: Boolean(record.is_recurring),
+          priority: record.priority as Priority,
+          recurrence_pattern: record.recurrence_pattern as RecurrencePattern | null,
+        }
+      : null;
+  },
+
+  create(userId: number, input: CreateTemplateInput): Template {
+    const result = db.prepare(
+      `INSERT INTO templates
+        (user_id, name, description, category, title_template, priority,
+         is_recurring, recurrence_pattern, reminder_minutes,
+         due_date_offset_minutes, subtasks_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      userId,
+      input.name.trim(),
+      input.description ?? null,
+      input.category ?? null,
+      input.title_template.trim(),
+      input.priority ?? 'medium',
+      input.is_recurring ? 1 : 0,
+      input.recurrence_pattern ?? null,
+      input.reminder_minutes ?? null,
+      input.due_date_offset_minutes ?? null,
+      input.subtasks?.length ? JSON.stringify(input.subtasks) : null,
+    );
+    const template = templateDB.findById(Number(result.lastInsertRowid), userId);
+    if (!template) throw new Error('Created template could not be loaded');
+    return template;
+  },
+
+  update(id: number, userId: number, input: UpdateTemplateInput): Template | null {
+    const existing = templateDB.findById(id, userId);
+    if (!existing) return null;
+    const values: Array<[string, unknown]> = [];
+    if (input.name !== undefined) values.push(['name', input.name.trim()]);
+    if (input.description !== undefined) values.push(['description', input.description]);
+    if (input.category !== undefined) values.push(['category', input.category]);
+    if (input.title_template !== undefined) {
+      values.push(['title_template', input.title_template.trim()]);
+    }
+    if (input.priority !== undefined) values.push(['priority', input.priority]);
+    if (input.is_recurring !== undefined) {
+      values.push(['is_recurring', input.is_recurring ? 1 : 0]);
+    }
+    if (input.recurrence_pattern !== undefined) {
+      values.push(['recurrence_pattern', input.recurrence_pattern]);
+    }
+    if (input.reminder_minutes !== undefined) {
+      values.push(['reminder_minutes', input.reminder_minutes]);
+    }
+    if (input.due_date_offset_minutes !== undefined) {
+      values.push(['due_date_offset_minutes', input.due_date_offset_minutes]);
+    }
+    if (input.subtasks !== undefined) {
+      values.push([
+        'subtasks_json',
+        input.subtasks.length ? JSON.stringify(input.subtasks) : null,
+      ]);
+    }
+    if (values.length > 0) {
+      const assignments = values.map(([column]) => `${column} = ?`).join(', ');
+      db.prepare(`UPDATE templates SET ${assignments} WHERE id = ? AND user_id = ?`)
+        .run(...values.map(([, value]) => value), id, userId);
+    }
+    return templateDB.findById(id, userId);
+  },
+
+  delete(id: number, userId: number): boolean {
+    return db.prepare('DELETE FROM templates WHERE id = ? AND user_id = ?')
+      .run(id, userId).changes > 0;
+  },
+
+  createTodoFromTemplate(id: number, userId: number, dueDate: string | null): Todo | null {
+    const createTodo = db.transaction(() => {
+      const template = templateDB.findById(id, userId);
+      if (!template) return null;
+      const todoResult = db.prepare(
+        `INSERT INTO todos
+          (user_id, title, due_date, priority, is_recurring, recurrence_pattern, reminder_minutes)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        userId,
+        template.title_template,
+        dueDate,
+        template.priority,
+        template.is_recurring ? 1 : 0,
+        template.recurrence_pattern,
+        template.reminder_minutes,
+      );
+      const todoId = Number(todoResult.lastInsertRowid);
+      if (template.subtasks_json) {
+        let subtasks: TemplateSubtask[];
+        try {
+          subtasks = JSON.parse(template.subtasks_json) as TemplateSubtask[];
+        } catch {
+          subtasks = [];
+        }
+        const insertSubtask = db.prepare(
+          'INSERT INTO subtasks (todo_id, title, position) VALUES (?, ?, ?)',
+        );
+        subtasks.forEach((subtask, index) => {
+          insertSubtask.run(todoId, subtask.title, subtask.position ?? index);
+        });
+      }
+      return findTodoById(db, todoId, userId);
+    });
+    return createTodo();
+  },
+};
+
+export const holidayDB = {
+  findAll(): Holiday[] {
+    return db.prepare(
+      'SELECT id, date, name FROM holidays ORDER BY date ASC, id ASC',
+    ).all() as Holiday[];
+  },
+
+  findByMonth(year: number, month: number): Holiday[] {
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      throw new RangeError('A valid year and month are required');
+    }
+    const firstDay = new Date(Date.UTC(year, month - 1, 1));
+    const firstWeekday = firstDay.getUTCDay();
+    const gridStart = new Date(firstDay.getTime() - firstWeekday * 86_400_000);
+    const gridEnd = new Date(gridStart.getTime() + 41 * 86_400_000);
+    const startDate = gridStart.toISOString().slice(0, 10);
+    const endDate = gridEnd.toISOString().slice(0, 10);
+    return db.prepare(
+      `SELECT id, date, name FROM holidays
+       WHERE date >= ? AND date <= ?
+       ORDER BY date ASC, id ASC`,
+    ).all(startDate, endDate) as Holiday[];
+  },
+
+  upsert(date: string, name: string): Holiday {
+    db.prepare(
+      `INSERT INTO holidays (date, name) VALUES (?, ?)
+       ON CONFLICT(date) DO UPDATE SET name = excluded.name`,
+    ).run(date, name);
+    const holiday = db.prepare(
+      'SELECT id, date, name FROM holidays WHERE date = ?',
+    ).get(date) as Holiday | undefined;
+    if (!holiday) throw new Error('Saved holiday could not be loaded');
+    return holiday;
   },
 };
 

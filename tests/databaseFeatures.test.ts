@@ -13,13 +13,24 @@ const state = await vi.hoisted(async () => {
   return { previous, directory };
 });
 
-const { createDatabase, db, subtaskDB, tagDB, todoDB, userDB } = await import('@/lib/db');
+const {
+  createDatabase,
+  db,
+  holidayDB,
+  subtaskDB,
+  tagDB,
+  templateDB,
+  todoDB,
+  userDB,
+} = await import('@/lib/db');
 const owner = userDB.create('database-owner');
 const other = userDB.create('database-other');
 
 beforeEach(() => {
   db.prepare('DELETE FROM todos').run();
   db.prepare('DELETE FROM tags').run();
+  db.prepare('DELETE FROM templates').run();
+  db.prepare('DELETE FROM holidays').run();
 });
 
 afterAll(() => {
@@ -277,5 +288,174 @@ describe('subtask persistence', () => {
     ]);
     todoDB.delete(todo.id, owner.id);
     expect(subtaskDB.findByTodoId(todo.id, owner.id)).toEqual([]);
+  });
+});
+
+describe('template persistence', () => {
+  it('scopes templates by owner and creates a snapshot todo with ordered subtasks', () => {
+    const template = templateDB.create(owner.id, {
+      name: '  Weekly Review  ',
+      title_template: '  Review the week  ',
+      priority: 'high',
+      is_recurring: true,
+      recurrence_pattern: 'weekly',
+      reminder_minutes: 60,
+      due_date_offset_minutes: 1440,
+      subtasks: [
+        { title: 'Collect notes', position: 0 },
+        { title: 'Plan next week', position: 1 },
+      ],
+    });
+
+    expect(template).toMatchObject({
+      name: 'Weekly Review',
+      title_template: 'Review the week',
+      priority: 'high',
+      is_recurring: true,
+      recurrence_pattern: 'weekly',
+      reminder_minutes: 60,
+      due_date_offset_minutes: 1440,
+      subtasks_json: JSON.stringify([
+        { title: 'Collect notes', position: 0 },
+        { title: 'Plan next week', position: 1 },
+      ]),
+    });
+    expect(templateDB.findById(template.id, other.id)).toBeNull();
+    expect(templateDB.findAllByUser(owner.id)).toEqual([template]);
+
+    const todo = templateDB.createTodoFromTemplate(
+      template.id,
+      owner.id,
+      '2026-12-09T10:00:00+08:00',
+    );
+    expect(todo).toMatchObject({
+      title: 'Review the week',
+      due_date: '2026-12-09T10:00:00+08:00',
+      priority: 'high',
+      is_recurring: true,
+      recurrence_pattern: 'weekly',
+      reminder_minutes: 60,
+      subtasks: [
+        { title: 'Collect notes', position: 0, completed: false },
+        { title: 'Plan next week', position: 1, completed: false },
+      ],
+      tags: [],
+    });
+    expect(templateDB.createTodoFromTemplate(template.id, other.id, null)).toBeNull();
+
+    expect(templateDB.delete(template.id, owner.id)).toBe(true);
+    expect(todoDB.findById(todo!.id, owner.id)).not.toBeNull();
+  });
+
+  it('rolls back todo creation if recreating a template subtask fails', () => {
+    const template = templateDB.create(owner.id, {
+      name: 'Broken checklist',
+      title_template: 'Should roll back',
+      subtasks: [{ title: 'Fails', position: 0 }],
+    });
+    db.exec(`CREATE TEMP TRIGGER fail_template_subtask
+      BEFORE INSERT ON subtasks
+      BEGIN SELECT RAISE(ABORT, 'subtask insert failed'); END;`);
+    try {
+      expect(() => templateDB.createTodoFromTemplate(template.id, owner.id, null))
+        .toThrow('subtask insert failed');
+      expect(todoDB.findAllByUser(owner.id)).toEqual([]);
+    } finally {
+      db.exec('DROP TRIGGER fail_template_subtask');
+    }
+  });
+});
+
+describe('export/import persistence', () => {
+  it('exports nested relations and imports new IDs while reusing tags case-insensitively', () => {
+    const existingTag = tagDB.create(owner.id, { name: 'Work', color: '#123456' });
+    const source = todoDB.create({
+      user_id: owner.id,
+      title: 'Exported source',
+      priority: 'high',
+      is_recurring: true,
+      recurrence_pattern: 'monthly',
+      due_date: '2026-12-31T09:00:00+08:00',
+      reminder_minutes: 60,
+      tag_ids: [existingTag.id],
+    });
+    subtaskDB.create(source.id, owner.id, { title: 'First step' });
+
+    const exported = todoDB.findAllWithRelations(owner.id);
+    expect(exported[0]).toMatchObject({
+      id: source.id,
+      subtasks: [{ title: 'First step' }],
+      tags: [{ id: existingTag.id, name: 'Work' }],
+    });
+
+    const result = todoDB.importAll(owner.id, [{
+      title: 'Imported source',
+      completed: false,
+      due_date: source.due_date,
+      priority: source.priority,
+      is_recurring: source.is_recurring,
+      recurrence_pattern: source.recurrence_pattern,
+      reminder_minutes: source.reminder_minutes,
+      created_at: source.created_at,
+      subtasks: [{ title: 'Imported step', completed: true, position: 7 }],
+      tags: [{ name: 'work', color: '#EF4444' }, { name: 'WORK', color: '#000000' }],
+    }]);
+
+    expect(result).toEqual({ imported: 1, tagsCreated: 0, tagsReused: 2 });
+    const todos = todoDB.findAllWithRelations(owner.id);
+    const imported = todos.find((todo) => todo.title === 'Imported source');
+    expect(imported?.id).not.toBe(source.id);
+    expect(imported).toMatchObject({
+      completed: false,
+      priority: 'high',
+      recurrence_pattern: 'monthly',
+      reminder_minutes: 60,
+      last_notification_sent: null,
+      subtasks: [{ title: 'Imported step', completed: true, position: 0 }],
+      tags: [{ id: existingTag.id, name: 'Work', color: '#123456' }],
+    });
+  });
+
+  it('rolls back all import rows if a child insert fails', () => {
+    const item = {
+      title: 'Atomic import',
+      completed: false,
+      due_date: null,
+      priority: 'medium' as const,
+      is_recurring: false,
+      recurrence_pattern: null,
+      reminder_minutes: null,
+      created_at: '2026-12-08T10:00:00+08:00',
+      subtasks: [{ title: 'Failing child', completed: false, position: 0 }],
+      tags: [{ name: 'New import tag', color: '#123456' }],
+    };
+    db.exec(`CREATE TEMP TRIGGER fail_import_subtask
+      BEFORE INSERT ON subtasks
+      BEGIN SELECT RAISE(ABORT, 'import child failed'); END;`);
+    try {
+      expect(() => todoDB.importAll(owner.id, [item])).toThrow('import child failed');
+      expect(todoDB.findAllByUser(owner.id)).toEqual([]);
+      expect(tagDB.findAllByUser(owner.id)).toEqual([]);
+    } finally {
+      db.exec('DROP TRIGGER fail_import_subtask');
+    }
+  });
+});
+
+describe('holiday persistence', () => {
+  it('upserts dates and returns holidays on the visible six-week calendar grid', () => {
+    holidayDB.upsert('2025-02-28', 'Before March');
+    holidayDB.upsert('2025-04-04', 'After March');
+    holidayDB.upsert('2025-04-04', 'Updated holiday');
+    holidayDB.upsert('2025-04-06', 'Outside grid');
+
+    expect(holidayDB.findAll()).toEqual([
+      { id: expect.any(Number), date: '2025-02-28', name: 'Before March' },
+      { id: expect.any(Number), date: '2025-04-04', name: 'Updated holiday' },
+      { id: expect.any(Number), date: '2025-04-06', name: 'Outside grid' },
+    ]);
+    expect(holidayDB.findByMonth(2025, 3).map(({ date }) => date))
+      .toEqual(['2025-02-28', '2025-04-04']);
+    expect(() => holidayDB.findByMonth(2025, 13)).toThrow('A valid year and month are required');
   });
 });
