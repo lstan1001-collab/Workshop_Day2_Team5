@@ -1,5 +1,16 @@
 # Complete Setup Guide: Todo App Development with GitHub Copilot
 
+## Phase 5 implementation on this branch
+
+Passkey authentication is implemented locally for review: registration, login,
+additional passkeys, logout, browser-bound challenges, JWT sessions, and SQLite
+persistence. See [Phase 5 setup and API contracts](PHASE5.md).
+
+Verified before upload: 13 database/session tests, 12 browser tests, TypeScript,
+and production build. Physical-device passkeys, production configuration, and
+exposed-token revocation remain unverified. Phases 1-4 are not implemented.
+The rest of this guide describes the target application rather than completed scope.
+
 This walkthrough will guide you from zero to running the Todo App with GitHub Copilot assistance.
 
 Reference : https://ai-sdlc-workshop-day1-production.up.railway.app/login
