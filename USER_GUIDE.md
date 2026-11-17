@@ -357,8 +357,13 @@ Save frequently used todo patterns as reusable templates for instant creation of
    - **Name**: Template identifier (required)
    - **Description**: Purpose/details (optional)
    - **Category**: Group similar templates (optional)
+   - **Due-date offset**: Whole minutes after use; required for recurring or reminder-enabled templates, minimum 1
+   - **Subtask checklist**: One title per line, recreated unchecked in the same order
 4. Click **"Save Template"**
 5. Template saved to your library
+
+You can also choose **Save as Template** on an existing todo to capture its settings and checklist.
+The offset is entered explicitly: the original due date and selected tags are not copied.
 
 ### Using Templates
 
@@ -412,11 +417,12 @@ Templates preserve:
 - ✅ Reminder timing (minutes before due)
 - ✅ Category information
 - ✅ Description
+- Subtask titles and ordering (completion states are reset on use)
+- Optional due-date offset, calculated from Singapore time at use
 
 **Note**: Templates do NOT include:
-- ❌ Specific due dates (you set when creating)
-- ❌ Tags (selected when creating from template)
-- ❌ Subtasks (added after creation)
+- Specific due dates (only a relative offset is saved)
+- Tags (assign these to the created todo afterward)
 
 ### Template Categories
 
@@ -808,12 +814,12 @@ ID,Title,Completed,Due Date,Priority,Recurring,Pattern,Reminder
 - Recurrence settings
 - Reminder timings
 - Creation timestamps
+- Subtasks, including completion and order
+- Tag associations; existing tag names are reused case-insensitively and keep their current color
 
 **What's NOT Imported**:
 - ❌ Original todo IDs (new IDs assigned)
 - ❌ User associations (links to importing user)
-- ❌ Tags (must be recreated/reassigned)
-- ❌ Subtasks (if not in export format)
 
 #### Import Validation
 
@@ -912,8 +918,9 @@ ID,Title,Completed,Due Date,Priority,Recurring,Pattern,Reminder
 - **Endpoint**: `/api/todos/import`
 - **Method**: POST
 - **Content-Type**: `application/json`
-- **Body**: Array of todo objects
-- **Response**: Success message with count
+- **Body**: Versioned JSON envelope `{ version: 1, exported_at, todos }` from this app's JSON export, including nested subtasks and tags
+- **Response**: `{ success: true, imported, tagsCreated, tagsReused }`
+- Import is all-or-nothing. If import succeeds but reloading fails, refresh the page rather than importing again.
 
 #### File Size Considerations
 - Small list (< 100 todos): < 50KB
@@ -946,7 +953,8 @@ Visualize your todos on a monthly calendar to see your schedule at a glance, spo
 - Full month calendar grid
 - Current month displayed by default
 - Days organized in week rows
-- Week starts on Sunday (configurable)
+- Week starts on Sunday, with exactly six rows (42 cells)
+- Month is retained in `?month=YYYY-MM`; invalid month values fall back to the current Singapore month
 
 #### Todo Display on Calendar
 - Todos appear on their due date
@@ -956,6 +964,7 @@ Visualize your todos on a monthly calendar to see your schedule at a glance, spo
   - 🔵 Low priority in blue
 - Todo titles shown on date cells
 - Multiple todos stack on same date
+- More than three todos show "+X more"; open the day to see the full read-only list
 
 #### Holiday Integration
 - Public holidays displayed (if configured)
@@ -987,14 +996,12 @@ Visualize your todos on a monthly calendar to see your schedule at a glance, spo
 
 #### Data Synchronization
 - Calendar shows same todos as list view
-- Changes sync automatically
-- Real-time updates
+- Todos are reloaded when the calendar is opened or its month changes
 - No separate data storage
 
 #### Filtering
-- Calendar respects active filters (if applicable)
-- Shows only relevant todos
-- Updates when filters change
+- Calendar shows all your due-dated todos, independent of list filters
+- Undated todos and uncreated future recurring instances are not shown
 
 ### Use Cases
 
