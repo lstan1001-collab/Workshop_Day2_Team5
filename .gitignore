@@ -1,0 +1,13 @@
+node_modules/
+todos.db
+todos.db-shm
+todos.db-wal
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+.next/
+playwright-report/
+test-results/
+*.tsbuildinfo
