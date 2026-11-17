@@ -43,6 +43,15 @@ export interface Subtask {
   created_at: string;
 }
 
+export interface CreateSubtaskInput {
+  title: string;
+}
+
+export interface UpdateSubtaskInput {
+  title?: string;
+  completed?: boolean;
+}
+
 export interface Todo {
   id: number;
   user_id: number;
@@ -283,6 +292,23 @@ function findTodoById(
   return record ? mapTodos([record], database)[0] : null;
 }
 
+function findSubtaskById(
+  database: SqliteDatabase,
+  id: number,
+  userId: number,
+): Subtask | null {
+  const record = database
+    .prepare(
+      `SELECT subtasks.id, subtasks.todo_id, subtasks.title, subtasks.completed,
+              subtasks.position, subtasks.created_at
+       FROM subtasks
+       INNER JOIN todos ON todos.id = subtasks.todo_id
+       WHERE subtasks.id = ? AND todos.user_id = ?`,
+    )
+    .get(id, userId) as SubtaskRecord | undefined;
+  return record ? { ...record, completed: Boolean(record.completed) } : null;
+}
+
 function normalizePriority(value: Priority | undefined): Priority {
   return value ?? 'medium';
 }
@@ -394,6 +420,23 @@ export const todoDB = {
     return findTodoById(db, id, userId);
   },
 
+  findDueReminders(userId: number, now: string): Todo[] {
+    const records = db
+      .prepare(
+        `SELECT * FROM todos
+         WHERE user_id = ?
+           AND completed = 0
+           AND due_date IS NOT NULL
+           AND reminder_minutes IS NOT NULL
+           AND last_notification_sent IS NULL
+           AND unixepoch(due_date, 'subsec') - reminder_minutes * 60 <= unixepoch(?, 'subsec')
+           AND unixepoch(due_date, 'subsec') >= unixepoch(?, 'subsec')
+         ORDER BY unixepoch(due_date, 'subsec') ASC, id ASC`,
+      )
+      .all(userId, now, now) as TodoRecord[];
+    return mapTodos(records, db);
+  },
+
   create(data: CreateTodoInput & { user_id: number }): Todo {
     const createTodo = db.transaction(() => {
       const result = db
@@ -446,6 +489,13 @@ export const todoDB = {
       if (data.reminder_minutes !== undefined) {
         columns.push(['reminder_minutes', data.reminder_minutes]);
       }
+      const reminderSettingsChanged =
+        (data.due_date !== undefined && data.due_date !== existing.due_date) ||
+        (data.reminder_minutes !== undefined &&
+          data.reminder_minutes !== existing.reminder_minutes);
+      if (reminderSettingsChanged) {
+        columns.push(['last_notification_sent', null]);
+      }
 
       if (columns.length > 0) {
         const assignments = columns.map(([column]) => `${column} = ?`).join(', ');
@@ -468,11 +518,134 @@ export const todoDB = {
     return updateTodo();
   },
 
+  completeAndCreateNext(
+    id: number,
+    userId: number,
+    data: UpdateTodoInput,
+    calculateNextDueDate: (dueDate: string, pattern: RecurrencePattern) => string,
+  ): { todo: Todo | null; nextInstance: Todo | null } {
+    const complete = db.transaction(() => {
+      const existing = findTodoById(db, id, userId);
+      if (!existing) return { todo: null, nextInstance: null };
+      if (existing.completed) return { todo: existing, nextInstance: null };
+
+      const updated = todoDB.update(id, userId, { ...data, completed: true });
+      if (!updated) return { todo: null, nextInstance: null };
+      if (
+        !updated.is_recurring ||
+        !updated.recurrence_pattern ||
+        !updated.due_date
+      ) {
+        return { todo: updated, nextInstance: null };
+      }
+
+      const tagIds = db
+        .prepare('SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_id')
+        .all(updated.id)
+        .map((row) => (row as { tag_id: number }).tag_id);
+      const nextInstance = todoDB.create({
+        user_id: userId,
+        title: updated.title,
+        due_date: calculateNextDueDate(updated.due_date, updated.recurrence_pattern),
+        priority: updated.priority,
+        is_recurring: true,
+        recurrence_pattern: updated.recurrence_pattern,
+        reminder_minutes: updated.reminder_minutes,
+        tag_ids: tagIds,
+      });
+      return { todo: updated, nextInstance };
+    });
+
+    return complete();
+  },
+
+  markReminderSent(id: number, userId: number, now: string): Todo | null {
+    db.prepare(
+      `UPDATE todos
+       SET last_notification_sent = ?
+       WHERE id = ? AND user_id = ? AND completed = 0
+         AND due_date IS NOT NULL AND reminder_minutes IS NOT NULL
+         AND last_notification_sent IS NULL
+         AND unixepoch(due_date, 'subsec') - reminder_minutes * 60 <= unixepoch(?, 'subsec')
+         AND unixepoch(due_date, 'subsec') >= unixepoch(?, 'subsec')`,
+    ).run(now, id, userId, now, now);
+    return findTodoById(db, id, userId);
+  },
+
   delete(id: number, userId: number): boolean {
     return (
       db
         .prepare('DELETE FROM todos WHERE id = ? AND user_id = ?')
         .run(id, userId).changes > 0
     );
+  },
+};
+
+export const subtaskDB = {
+  findByTodoId(todoId: number, userId: number): Subtask[] {
+    return (db
+      .prepare(
+        `SELECT subtasks.id, subtasks.todo_id, subtasks.title, subtasks.completed,
+                subtasks.position, subtasks.created_at
+         FROM subtasks
+         INNER JOIN todos ON todos.id = subtasks.todo_id
+         WHERE subtasks.todo_id = ? AND todos.user_id = ?
+         ORDER BY subtasks.position ASC, subtasks.id ASC`,
+      )
+      .all(todoId, userId) as SubtaskRecord[]).map((record) => ({
+      ...record,
+      completed: Boolean(record.completed),
+    }));
+  },
+
+  create(todoId: number, userId: number, input: CreateSubtaskInput): Subtask | null {
+    const createSubtask = db.transaction(() => {
+      const parent = db
+        .prepare('SELECT id FROM todos WHERE id = ? AND user_id = ?')
+        .get(todoId, userId);
+      if (!parent) return null;
+
+      const position = db
+        .prepare('SELECT COALESCE(MAX(position), -1) + 1 AS position FROM subtasks WHERE todo_id = ?')
+        .get(todoId) as { position: number };
+      const result = db
+        .prepare('INSERT INTO subtasks (todo_id, title, position) VALUES (?, ?, ?)')
+        .run(todoId, input.title, position.position);
+      return findSubtaskById(db, Number(result.lastInsertRowid), userId);
+    });
+    return createSubtask();
+  },
+
+  update(id: number, userId: number, input: UpdateSubtaskInput): Subtask | null {
+    const updateSubtask = db.transaction(() => {
+      const existing = findSubtaskById(db, id, userId);
+      if (!existing) return null;
+
+      const columns: Array<[string, unknown]> = [];
+      if (input.title !== undefined) columns.push(['title', input.title]);
+      if (input.completed !== undefined) {
+        columns.push(['completed', input.completed ? 1 : 0]);
+      }
+      if (columns.length > 0) {
+        const assignments = columns.map(([column]) => `${column} = ?`).join(', ');
+        db.prepare(
+          `UPDATE subtasks SET ${assignments}
+           WHERE id = ? AND EXISTS (
+             SELECT 1 FROM todos WHERE todos.id = subtasks.todo_id AND todos.user_id = ?
+           )`,
+        ).run(...columns.map(([, value]) => value), id, userId);
+      }
+      return findSubtaskById(db, id, userId);
+    });
+    return updateSubtask();
+  },
+
+  delete(id: number, userId: number): boolean {
+    return db.prepare(
+      `DELETE FROM subtasks
+       WHERE id = ? AND EXISTS (
+         SELECT 1 FROM todos WHERE todos.id = subtasks.todo_id AND todos.user_id = ?
+       )`,
+    ).run(id, userId).changes > 0;
   },
 };

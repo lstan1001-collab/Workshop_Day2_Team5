@@ -14,6 +14,14 @@ const dateSchema = z.string().transform((value, context) => {
   }
   return toSingaporeISO(date);
 }).nullable();
+const reminderTimestampSchema = z.string().transform((value, context) => {
+  const date = parseSingaporeDate(value);
+  if (!date) {
+    context.addIssue({ code: 'custom', message: 'Invalid reminder timestamp' });
+    return z.NEVER;
+  }
+  return toSingaporeISO(date);
+});
 const fields = {
   title: z.string().trim().min(1, 'Title is required'),
   due_date: dateSchema.optional(),
@@ -45,6 +53,10 @@ export function validateTodoId(value: string): number {
   const id = Number(value);
   if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(id)) throw new ApiError('Invalid todo ID');
   return id;
+}
+
+export function validateReminderTimestamp(value: unknown): string {
+  return reminderTimestampSchema.parse(value);
 }
 
 function validateRelationships(

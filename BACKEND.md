@@ -16,9 +16,8 @@ The challenge store is process-local: restarting the server requires retrying
 login/registration. Deploy one Node process with the local SQLite database.
 Multi-process deployment requires a shared challenge store and suitable database.
 
-Only the Todo CRUD and priority features are in this milestone. Authentication
-is their prerequisite; recurrence scheduling, notification delivery, and related
-feature UIs are not implemented by this backend milestone.
+The backend supports Todo CRUD and priority plus recurring completion,
+reminder polling, and subtasks (PRPs 03-05). Authentication is their prerequisite.
 
 Verify with `npm run typecheck`, `npm run lint`, and `npm test`.
 Once the UI is present, also run `npm run build` and `npm run test:e2e`.
@@ -35,7 +34,8 @@ Unexpected server failures are logged without request bodies and return 500.
   Optional `?priority=high|medium|low` filters direct API consumers; invalid values
   return 400. The UI can still combine filters locally.
 - `GET /api/todos/[id]`: returns one Todo.
-- `PUT /api/todos/[id]`: `UpdateTodoInput`; returns the updated Todo. Omitted
+- `PUT /api/todos/[id]`: `UpdateTodoInput`; returns the updated Todo, or
+  `{ todo, nextInstance }` when completing a recurring todo spawns its successor. Omitted
   fields stay unchanged. `priority: null` is rejected; create omission/null
   defaults to medium. Only documented writable fields are accepted.
 - `DELETE /api/todos/[id]`: returns `{ success: true }`; child subtasks and tag
@@ -49,3 +49,26 @@ and reminders do not still require it. DB timestamps use SQLite's UTC convention
 clients must interpret those timestamps as UTC when sorting/displaying them.
 Completed ordering uses `updated_at` (or `created_at`), as specified in PRP 01;
 editing a completed item can therefore move it in that section.
+
+## Feature persistence (PRPs 03-05)
+
+`todoDB.completeAndCreateNext(id, userId, input, calculateNextDueDate)` performs
+the completion, next-instance insertion, and tag copying in one transaction.
+Failure rolls back all writes. An already-completed row does not spawn another
+instance. The successor inherits the updated title, priority, recurrence,
+reminder offset and tags, but starts incomplete with no notification timestamp
+or subtasks.
+
+`findDueReminders(userId, now)` and `markReminderSent(id, userId, now)` compare
+offset-aware timestamps at millisecond precision. Eligibility runs from the
+reminder trigger through the due instant, inclusive; overdue reminders are
+excluded. Changed due dates or reminder offsets clear the notification stamp;
+unrelated edits and unchanged settings preserve it. Browser delivery remains
+best-effort across tabs, not an exactly-once guarantee.
+
+All `subtaskDB` methods require the owning user ID. Child completion is
+independent of parent completion; additions use the current maximum position
+plus one, starting at zero. Deletion does not compact positions. Foreign keys
+are enabled on every connection so parent deletion removes children and tag
+associations. Schema initialization adds missing todo feature columns without
+replacing existing rows and is safe to repeat.

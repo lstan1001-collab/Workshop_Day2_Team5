@@ -4,6 +4,27 @@ This walkthrough will guide you from zero to running the Todo App with GitHub Co
 
 Reference : https://ai-sdlc-workshop-day1-production.up.railway.app/login
 
+## Solution frontend: features 3-5
+
+The `solution` branch includes a passkey login page and todo interface for recurring tasks,
+browser reminders, and independent subtask checklists. Due-date inputs and displays use
+Singapore time, even when the browser is in another timezone. Clearing a due date also
+clears recurrence and reminder settings.
+
+Reminders require notification permission and an open app tab. The browser polls every
+30 seconds; operating-system delivery and cross-tab deduplication are best-effort, not
+background push notifications. Notification failures appear beside the reminder controls.
+
+Run frontend acceptance checks against mocked API responses with
+`npx playwright test --config playwright.frontend.config.ts`; this starts and stops an
+isolated development server on port 3217. Install its browser first with
+`npx playwright install chromium --only-shell`. These tests do not alter the SQLite database
+or verify physical passkey devices or operating-system notification rendering.
+Coverage includes recurring-completion reconciliation, due-date setting cleanup,
+failed subtask mutation rollback, last-child progress removal, explicit notification
+opt-in, permission revocation, and acknowledgement retries without same-tab redisplay.
+Unit checks are in `tests/todoPresentation.test.ts`.
+
 ---
 
 ## Table of Contents
